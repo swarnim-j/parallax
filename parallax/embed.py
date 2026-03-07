@@ -9,12 +9,15 @@ MAX_SEQ_LEN = 1022
 
 
 class Embedder:
-    def __init__(self, model_name="esm2_t6_8M_UR50D"):
+    def __init__(self, model_name: str | None = None):
+        default = "esm2_t30_150M_UR50D" if torch.cuda.is_available() else "esm2_t6_8M_UR50D"
+        model_name = model_name or os.environ.get("ESM_MODEL", default)
+        self.model_name = model_name
         self.model, self.alphabet = getattr(esm.pretrained, model_name)()
         self.model.eval()
         self.batch_converter = self.alphabet.get_batch_converter()
         self.num_layers = int(model_name.split("_t")[1].split("_")[0])
-        self.device = "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = self.model.to(self.device)
 
     def embed(self, sequence: str) -> np.ndarray:
@@ -27,7 +30,14 @@ class Embedder:
         return weighted / np.linalg.norm(weighted)
 
     def embed_batch(self, sequences: list[str]) -> np.ndarray:
-        return np.stack([self.embed(seq) for seq in sequences])
+        results = []
+        for i, seq in enumerate(sequences):
+            results.append(self.embed(seq))
+            if (i + 1) % 500 == 0:
+                print(f"    {i+1}/{len(sequences)} embedded", flush=True)
+        if len(sequences) >= 500:
+            print(f"    {len(sequences)}/{len(sequences)} embedded", flush=True)
+        return np.stack(results)
 
     def embed_windows(self, sequence: str, window_size: int = 100, stride: int = 50) -> list[tuple[int, int, np.ndarray]]:
         if len(sequence) <= window_size:

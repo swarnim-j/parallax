@@ -15,7 +15,7 @@ EPOCHS = 10
 LR = 1e-4
 BATCH_SIZE = 8
 VAL_SPLIT = 0.1
-MODEL_NAME = "esm2_t6_8M_UR50D"
+MODEL_NAME = os.environ.get("ESM_MODEL", "esm2_t30_150M_UR50D")
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "data/finetuned"))
 
 

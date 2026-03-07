@@ -9,7 +9,7 @@ from .embed import Embedder
 from .multiscale import multiscale_screen
 from .translate import is_dna, translate_dna
 
-RISK_THRESHOLD = 0.6
+RISK_THRESHOLD = 0.85
 _aligner = PairwiseAligner(mode="global", match_score=1, mismatch_score=0, open_gap_score=0, extend_gap_score=0)
 
 

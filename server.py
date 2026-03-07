@@ -26,7 +26,7 @@ classifier = HazardClassifier.load("data/classifier") if Path("data/classifier")
 screener = Screener(embedder, hazard_db, classifier)
 
 # Sample subset for t-SNE visualization (full DB is too large to plot)
-VIZ_SAMPLE = 200
+VIZ_SAMPLE = 100
 rng = np.random.RandomState(42)
 all_emb, all_labels, all_names = [], [], []
 

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Fetch hazard + benign proteins from UniProt, download AlphaFold structures,
-generate synthetic variants with ProteinMPNN, embed everything, and train classifier."""
+"""Fetch proteins, generate ProteinMPNN variants, embed, train classifier."""
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -10,14 +8,16 @@ from pathlib import Path
 import requests
 
 UNIPROT_BASE = "https://rest.uniprot.org/uniprotkb/search"
-ALPHAFOLD_PDB = "https://alphafold.ebi.ac.uk/files/AF-{acc}-F1-model_v4.pdb"
+ALPHAFOLD_PDB = "https://alphafold.ebi.ac.uk/files/AF-{acc}-F1-model_v6.pdb"
 PAGE_SIZE = 500
 
 HAZARD_QUERY = "(keyword:KW-0800+OR+keyword:KW-0843+OR+keyword:KW-0046+OR+go:0090729)+AND+reviewed:true"
-BENIGN_QUERY = "keyword:KW-0597+AND+reviewed:true+AND+organism_id:9606"
+BENIGN_QUERY = "reviewed:true+AND+organism_id:9606+NOT+keyword:KW-0800+NOT+keyword:KW-0843"
 
-MPNN_VARIANTS_PER_STRUCTURE = 5
-MPNN_SAMPLING_TEMP = 0.2
+# ProteinMPNN settings — top N hazards get synthetic variants
+MPNN_TOP_N = 50
+MPNN_VARIANTS = 20
+MPNN_TEMP = "0.2"
 
 
 def fetch_uniprot(query: str) -> dict[str, tuple[str, str]]:
@@ -43,123 +43,112 @@ def fetch_uniprot(query: str) -> dict[str, tuple[str, str]]:
     return proteins
 
 
-def download_alphafold_structures(accessions: list[str], out_dir: Path, max_count: int = 2000) -> list[Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    downloaded = []
-    for acc in accessions[:max_count]:
-        pdb_path = out_dir / f"AF-{acc}-F1.pdb"
-        if pdb_path.exists():
-            downloaded.append(pdb_path)
-            continue
-        url = ALPHAFOLD_PDB.format(acc=acc)
-        try:
-            resp = requests.get(url, timeout=30)
-            if resp.status_code == 200 and "ATOM" in resp.text:
-                pdb_path.write_text(resp.text)
-                downloaded.append(pdb_path)
-        except Exception:
-            pass
-    return downloaded
+def download_structure(acc: str, out_dir: Path) -> Path | None:
+    pdb_path = out_dir / f"{acc}.pdb"
+    if pdb_path.exists():
+        return pdb_path
+    try:
+        resp = requests.get(ALPHAFOLD_PDB.format(acc=acc), timeout=30)
+        if resp.status_code == 200 and "ATOM" in resp.text:
+            pdb_path.write_text(resp.text)
+            return pdb_path
+    except Exception:
+        pass
+    return None
 
 
-def generate_mpnn_variants(pdb_dir: Path, out_dir: Path, n_variants: int, temp: float) -> dict[str, list[str]]:
-    out_dir.mkdir(parents=True, exist_ok=True)
+def run_mpnn(pdb_path: Path, out_dir: Path) -> list[str]:
     mpnn_dir = Path("ProteinMPNN")
+    result_dir = out_dir / pdb_path.stem
+    result_dir.mkdir(parents=True, exist_ok=True)
 
-    if not mpnn_dir.exists():
-        print("  Cloning ProteinMPNN...", flush=True)
-        subprocess.run(["git", "clone", "https://github.com/dauparas/ProteinMPNN.git"], check=True)
+    cmd = [
+        sys.executable, str(mpnn_dir / "protein_mpnn_run.py"),
+        "--pdb_path", str(pdb_path),
+        "--out_folder", str(result_dir),
+        "--num_seq_per_target", str(MPNN_VARIANTS),
+        "--sampling_temp", MPNN_TEMP,
+        "--model_name", "v_48_020",
+        "--seed", "42",
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=120)
+    except Exception:
+        return []
 
-    variants = {}
-    pdb_files = sorted(pdb_dir.glob("*.pdb"))
-    print(f"  Running ProteinMPNN on {len(pdb_files)} structures...", flush=True)
-
-    for pdb_path in pdb_files:
-        acc = pdb_path.stem.replace("AF-", "").replace("-F1", "")
-        result_dir = out_dir / acc
-        result_dir.mkdir(exist_ok=True)
-
-        cmd = [
-            sys.executable, str(mpnn_dir / "protein_mpnn_run.py"),
-            "--pdb_path", str(pdb_path),
-            "--out_folder", str(result_dir),
-            "--num_seq_per_target", str(n_variants),
-            "--sampling_temp", str(temp),
-            "--model_name", "v_48_020",
-            "--seed", "42",
-        ]
-
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=120)
-            fasta_dir = result_dir / "seqs"
-            if fasta_dir.exists():
-                seqs = []
-                for fa in fasta_dir.glob("*.fa"):
-                    for line in fa.read_text().split("\n"):
-                        if line and not line.startswith(">"):
-                            seqs.append(line.strip())
-                if seqs:
-                    variants[acc] = seqs[1:]  # skip first (original sequence)
-        except Exception:
-            pass
-
-    return variants
+    seqs = []
+    fasta_dir = result_dir / "seqs"
+    if fasta_dir.exists():
+        for fa in fasta_dir.glob("*.fa"):
+            reading_seq = False
+            for line in fa.read_text().split("\n"):
+                if line.startswith(">"):
+                    reading_seq = True
+                    continue
+                if reading_seq and line.strip():
+                    seqs.append(line.strip())
+                    reading_seq = False
+    return seqs[1:]  # skip original sequence (first entry)
 
 
 def main():
-    print("=== Step 1: Fetch proteins from UniProt ===", flush=True)
-
+    # Step 1: Fetch from UniProt
     print("Fetching hazard proteins...", flush=True)
     hazards = fetch_uniprot(HAZARD_QUERY)
-    print(f"  Got {len(hazards)} hazard proteins", flush=True)
+    print(f"  {len(hazards)} hazard proteins", flush=True)
 
     print("Fetching benign proteins...", flush=True)
     benign = fetch_uniprot(BENIGN_QUERY)
-    print(f"  Got {len(benign)} benign proteins", flush=True)
+    print(f"  {len(benign)} benign proteins", flush=True)
 
-    print("\n=== Step 2: Download AlphaFold structures ===", flush=True)
-    hazard_accs = [acc for _, (_, acc) in hazards.items()]
-    structures_dir = Path("data/structures")
-    pdb_files = download_alphafold_structures(hazard_accs, structures_dir)
-    print(f"  Downloaded {len(pdb_files)} structures", flush=True)
+    # Step 2: ProteinMPNN variants for top hazards
+    print(f"\nGenerating ProteinMPNN variants for top {MPNN_TOP_N} hazards...", flush=True)
 
-    print("\n=== Step 3: Generate ProteinMPNN variants ===", flush=True)
-    variants_dir = Path("data/mpnn_variants")
-    variants = generate_mpnn_variants(structures_dir, variants_dir, MPNN_VARIANTS_PER_STRUCTURE, MPNN_SAMPLING_TEMP)
-    total_variants = sum(len(v) for v in variants.values())
-    print(f"  Generated {total_variants} synthetic variants from {len(variants)} structures", flush=True)
+    if not Path("ProteinMPNN").exists():
+        subprocess.run(["git", "clone", "https://github.com/dauparas/ProteinMPNN.git"], check=True)
 
-    # Add synthetic variants to hazard set
-    for acc, seqs in variants.items():
-        for i, seq in enumerate(seqs):
-            hazards[f"synthetic_{acc}_{i}"] = (seq, f"{acc}_mpnn_{i}")
+    struct_dir = Path("data/structures")
+    struct_dir.mkdir(parents=True, exist_ok=True)
+    mpnn_out = Path("data/mpnn_out")
 
-    print(f"\n=== Step 4: Embed all proteins ===", flush=True)
-    print(f"  Total hazard (real + synthetic): {len(hazards)}", flush=True)
-    print(f"  Total benign: {len(benign)}", flush=True)
+    accs = [acc for _, (_, acc) in list(hazards.items())[:MPNN_TOP_N]]
+    total_variants = 0
 
+    for i, acc in enumerate(accs):
+        pdb = download_structure(acc, struct_dir)
+        if not pdb:
+            continue
+        variants = run_mpnn(pdb, mpnn_out)
+        for j, seq in enumerate(variants):
+            hazards[f"mpnn_{acc}_{j}"] = (seq, f"{acc}_v{j}")
+            total_variants += 1
+        print(f"  [{i+1}/{MPNN_TOP_N}] {acc}: {len(variants)} variants", flush=True)
+
+    print(f"  Total synthetic variants: {total_variants}", flush=True)
+
+    # Step 3: Embed
+    print(f"\nEmbedding {len(hazards)} hazard + {len(benign)} benign proteins...", flush=True)
     from parallax.embed import Embedder
     from parallax.db import HazardDB
 
     embedder = Embedder()
-
     for label, proteins, path in [
         ("hazard", hazards, Path("data/hazard_db")),
         ("benign", benign, Path("data/benign_db")),
     ]:
-        print(f"  Embedding {len(proteins)} {label} proteins...", flush=True)
+        print(f"  {label}: {len(proteins)}...", flush=True)
         db = HazardDB()
         db.build(proteins, embedder)
         db.save(str(path))
-        print(f"  Saved to {path}", flush=True)
 
-    print("\n=== Step 5: Train classifier ===", flush=True)
+    # Step 4: Train MLP classifier
+    print("\nTraining classifier...", flush=True)
     from parallax.classifier import train_classifier
     hazard_db = HazardDB.load("data/hazard_db")
     benign_db = HazardDB.load("data/benign_db")
     model, metrics = train_classifier(hazard_db.embeddings, benign_db.embeddings, epochs=30)
     model.save("data/classifier")
-    print(f"  val_acc={metrics['val_acc']:.3f} precision={metrics['precision']:.3f} recall={metrics['recall']:.3f}", flush=True)
+    print(f"  acc={metrics['val_acc']:.3f} prec={metrics['precision']:.3f} rec={metrics['recall']:.3f}", flush=True)
 
     print("\nDone.", flush=True)
 

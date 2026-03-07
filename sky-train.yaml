@@ -1,11 +1,16 @@
 name: parallax-train
 
 resources:
-  cloud: aws
-  accelerators: L40S:1
-  use_spot: false
+  cloud: gcp
+  accelerators: A100-80GB:1
+  use_spot: true
   disk_size: 100
-  region: us-east-1
+  any_of:
+    - region: us-central1
+    - region: us-east4
+    - region: us-west1
+    - region: us-west4
+    - region: us-east1
 
 workdir: .
 
@@ -15,21 +20,6 @@ setup: |
   uv venv .venv --python 3.11
   source .venv/bin/activate
   uv pip install torch --index-url https://download.pytorch.org/whl/cu121
-  uv pip install fair-esm numpy biopython scikit-learn requests fastapi uvicorn
+  uv pip install fair-esm numpy biopython scikit-learn requests
 
-  # Clone ProteinMPNN
   git clone https://github.com/dauparas/ProteinMPNN.git || true
-
-run: |
-  set -ex
-  source .venv/bin/activate
-
-  echo "=== Building database (fetch + structures + ProteinMPNN + embed) ==="
-  python build_db.py
-
-  echo "=== Fine-tuning ESM-2 ==="
-  python train.py
-
-  echo "=== Results ==="
-  ls -lh data/hazard_db/ data/benign_db/ data/finetuned/ data/classifier/
-  echo "Done. Run: sky rsync parallax-train:~/sky_workdir/data/ data/"
