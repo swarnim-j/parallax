@@ -50,7 +50,7 @@ app = FastAPI(title="Parallax")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 ESMFOLD_ENDPOINT = "https://api.esmatlas.com/foldSequence/v1/pdb/"
-MAX_FOLD_LENGTH = 1000
+MAX_FOLD_LENGTH = 400
 ALLOWED_AA = set("ACDEFGHIKLMNPQRSTVWYBXZJUO")
 
 
@@ -138,14 +138,11 @@ def embedding_space():
 def structure_sequence(req: ScreenRequest):
     protein, input_type = protein_for_folding(req.sequence)
 
-    if len(protein) > MAX_FOLD_LENGTH:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Sequence is too long for live folding ({len(protein)} aa > {MAX_FOLD_LENGTH} aa).",
-        )
+    truncated = len(protein) > MAX_FOLD_LENGTH
+    fold_protein = protein[:MAX_FOLD_LENGTH] if truncated else protein
 
     try:
-        pdb_text = fold_with_esmfold(protein)
+        pdb_text = fold_with_esmfold(fold_protein)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -156,6 +153,7 @@ def structure_sequence(req: ScreenRequest):
             "protein_sequence": protein,
             "pdb": pdb_text,
             "fold_source": "esmatlas-esmfold-v1",
+            "truncated": truncated,
         }
     )
 
